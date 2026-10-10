@@ -1,0 +1,9 @@
+# environment and caches
+.venv/
+__pycache__/
+*.pyc
+
+# raw and large data (re-created by download_data.py and build_features.py)
+data/imdb/
+data/movielens/
+data/processed/*.csv.gz
