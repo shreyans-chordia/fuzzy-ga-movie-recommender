@@ -1,7 +1,8 @@
 """Step 9b: Genetic algorithm that evolves the 10 rule weights.
 
   chromosome : 10 floats in [0, 1], one weight per fuzzy rule
-  fitness    : mean per-user Spearman on the TRAIN split (earliest 70% of each user's ratings)
+  fitness    : mean per-user Precision@10 on the TRAIN split (earliest 70% of each user's ratings);
+               --metric spearman switches back to mean per-user Spearman for comparison
   operators  : tournament selection, blend crossover, gaussian mutation, elitism
   report     : the evolved weights are judged on the held-out TEST split (latest 30%)
 
@@ -9,6 +10,7 @@ Usage (from the project folder):
   python ga.py                      run all three membership families, then print the report
   python ga.py --family Gaussian    run one family only
   python ga.py --report             re-print the report and redraw the plot from saved results
+  python ga.py --metric spearman    use Spearman instead of Precision@10 as the fitness
 """
 import argparse
 import json
@@ -32,6 +34,9 @@ ROOT = Path(__file__).resolve().parent
 OUT = ROOT / "data" / "processed"
 N_RULES = len(RULES)
 CXPB, MUTPB, INDPB, SIGMA, TOURN, ELITE = 0.7, 0.4, 0.3, 0.15, 3, 2
+METRICS = {"p_at_k": "P@10", "spearman": "Spearman"}   # evaluator key -> label
+DEFAULT_METRIC = "p_at_k"
+RESULT_KEY = {"p_at_k": "p", "spearman": "spearman"}  # suffix used in train_*/test_* result fields
 OUT_RULES = {s: [i for i, (_, o) in enumerate(RULES) if o == s] for s in OUTPUT_SETS}
 
 
@@ -58,7 +63,7 @@ def clip01(ind):
     ind[:] = [min(1.0, max(0.0, x)) for x in ind]
 
 
-def run_ga(scorer, ev_train, seed, pop_size, ngen):
+def run_ga(scorer, ev_train, seed, pop_size, ngen, metric=DEFAULT_METRIC):
     random.seed(seed)
     if not hasattr(creator, "FitnessMax"):
         creator.create("FitnessMax", base.Fitness, weights=(1.0,))
@@ -69,7 +74,7 @@ def run_ga(scorer, ev_train, seed, pop_size, ngen):
     tb.register("mutate", tools.mutGaussian, mu=0.0, sigma=SIGMA, indpb=INDPB)
 
     def fit(ind):
-        f = ev_train.evaluate(scorer(ind))["spearman"]
+        f = ev_train.evaluate(scorer(ind))[metric]
         return f if np.isfinite(f) else -1.0
 
     pop = [creator.Individual(random.random() for _ in range(N_RULES)) for _ in range(pop_size)]
@@ -102,7 +107,7 @@ def run_ga(scorer, ev_train, seed, pop_size, ngen):
     return list(best), history
 
 
-def run_family(family, seeds, pop_size, ngen):
+def run_family(family, seeds, pop_size, ngen, metric=DEFAULT_METRIC):
     items, ratings, _ = load_data()
     train, test = Evaluator(ratings, "train"), Evaluator(ratings, "test")
     scorer = FastScorer(items, family)
@@ -116,16 +121,17 @@ def run_family(family, seeds, pop_size, ngen):
         return {"train_spearman": a["spearman"], "train_p": a["p_at_k"],
                 "test_spearman": b["spearman"], "test_p": b["p_at_k"]}
 
-    result = {"family": family, "pop": pop_size, "gens": ngen,
+    result = {"family": family, "pop": pop_size, "gens": ngen, "metric": metric,
               "baseline_weights": [float(x) for x in BASELINE_WEIGHTS],
               "baseline": judge(BASELINE_WEIGHTS), "runs": []}
     for seed in seeds:
         t = time.time()
-        w, hist = run_ga(scorer, train, seed, pop_size, ngen)
+        w, hist = run_ga(scorer, train, seed, pop_size, ngen, metric)
         res = judge(w)
         result["runs"].append({"seed": seed, "weights": [float(x) for x in w], "history": hist, **res})
-        print(f"  {family:11s} seed {seed}: train {res['train_spearman']:.4f} "
-              f"test {res['test_spearman']:.4f}  ({time.time() - t:.0f}s)", flush=True)
+        k = RESULT_KEY[metric]
+        print(f"  {family:11s} seed {seed}: train {METRICS[metric]} {res['train_' + k]:.4f} "
+              f"test {res['test_' + k]:.4f}  ({time.time() - t:.0f}s)", flush=True)
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / f"ga_{family}.json").write_text(json.dumps(result, indent=1))
     return result
@@ -139,15 +145,18 @@ def report():
     if not results:
         print("no saved results; run ga.py first"); return
     print(f"\nHeld-out TEST split. Reference, IMDb rating alone: Spearman {ref['spearman']:.4f}, P@10 {ref['p_at_k']:.4f}\n")
-    hdr = f"{'family':12s}{'baseline Sp':>12s}{'GA Sp (mean±sd)':>20s}{'GA wins':>9s}{'baseline P@10':>15s}{'GA P@10 (mean±sd)':>22s}{'train Sp: base→GA':>22s}"
+    hdr = (f"{'family':12s}{'fitness':>9s}{'baseline Sp':>12s}{'GA Sp (mean±sd)':>20s}{'baseline P@10':>15s}"
+           f"{'GA P@10 (mean±sd)':>22s}{'GA wins':>9s}{'train fit: base→GA':>22s}")
     print(hdr); print("-" * len(hdr))
     for fam, r in results.items():
         runs, b = r["runs"], r["baseline"]
         sp = np.array([x["test_spearman"] for x in runs]); pp = np.array([x["test_p"] for x in runs])
-        tr = np.array([x["train_spearman"] for x in runs])
-        wins = int((sp > b["test_spearman"]).sum())
-        print(f"{fam:12s}{b['test_spearman']:12.4f}{sp.mean():12.4f} ± {sp.std():.4f}{wins:>5d}/{len(runs)}"
-              f"{b['test_p']:15.4f}{pp.mean():14.4f} ± {pp.std():.4f}{b['train_spearman']:>12.4f} → {tr.mean():.4f}")
+        m = r.get("metric", "spearman"); k = RESULT_KEY[m]
+        tr = np.array([x["train_" + k] for x in runs])
+        wins = int((np.array([x["test_" + k] for x in runs]) > b["test_" + k]).sum())   # on the fitness metric
+        print(f"{fam:12s}{METRICS[m]:>9s}{b['test_spearman']:12.4f}{sp.mean():12.4f} ± {sp.std():.4f}"
+              f"{b['test_p']:15.4f}{pp.mean():14.4f} ± {pp.std():.4f}{wins:>5d}/{len(runs)}"
+              f"{b['train_' + k]:>12.4f} → {tr.mean():.4f}")
     print("\nLearned weights (mean over seeds) vs hand-tuned baseline:")
     rule_names = ["r1 High&PopHigh→High", "r2 High&New→High", "r3 High&PopLow→Med", "r4 Med&PopHigh→Med",
                   "r5 Med&New→Med", "r6 RatLow→Low", "r7 PopLow&Old→Low", "r8 Med&PopLow→Low",
@@ -168,7 +177,7 @@ def report():
         best = np.mean([[h["best"] for h in x["history"]] for x in r["runs"]], axis=0)
         mean = np.mean([[h["mean"] for h in x["history"]] for x in r["runs"]], axis=0)
         ax.set_facecolor(surface)
-        ax.axhline(r["baseline"]["train_spearman"], color=c_base, lw=1.5, ls="--", label="hand-tuned baseline")
+        ax.axhline(r["baseline"]["train_" + RESULT_KEY[r.get("metric", "spearman")]], color=c_base, lw=1.5, ls="--", label="hand-tuned baseline")
         ax.plot(gens, mean, color=c_mean, lw=2, label="population mean")
         ax.plot(gens, best, color=c_best, lw=2, label="best in population")
         ax.set_title(fam, color=ink, fontsize=11)
@@ -179,7 +188,8 @@ def report():
             ax.spines[sp_].set_visible(False)
         for sp_ in ("left", "bottom"):
             ax.spines[sp_].set_color(grid)
-    axes[0].set_ylabel("train Spearman (mean of seeds)", color=ink2)
+    fit_label = METRICS[next(iter(results.values())).get("metric", "spearman")]
+    axes[0].set_ylabel(f"train {fit_label} (mean of seeds)", color=ink2)
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, frameon=False, labelcolor=ink2, fontsize=9, loc="lower center", ncol=3)
     fig.suptitle("GA convergence: fitness per generation", color=ink, fontsize=12)
@@ -194,9 +204,10 @@ if __name__ == "__main__":
     ap.add_argument("--seeds", type=int, default=5)
     ap.add_argument("--pop", type=int, default=30)
     ap.add_argument("--gens", type=int, default=20)
+    ap.add_argument("--metric", default=DEFAULT_METRIC, choices=list(METRICS), help="GA fitness metric")
     ap.add_argument("--report", action="store_true", help="only print the report from saved results")
     a = ap.parse_args()
     if not a.report:
         for fam in (FAMILIES if a.family == "all" else [a.family]):
-            run_family(fam, list(range(a.seeds)), a.pop, a.gens)
+            run_family(fam, list(range(a.seeds)), a.pop, a.gens, a.metric)
     report()
