@@ -57,6 +57,23 @@ Titles with fewer than 100 votes, adult titles, and titles with no year are drop
 
 The weight-independent part of the fuzzy computation (rule firing strengths) is cached, so each fitness evaluation only redoes the weighted aggregation. An assertion checks that this fast path matches the reference implementation exactly.
 
+### 5. Top-N recommendations (`recommend.py`)
+- Scores the whole catalogue with the best GA run's weights (or the baseline weights), removes the movies the user already rated in the **train** split, and returns the N highest-scored titles.
+- Movies the user rated later (the **test** split) stay in the candidate list, so the output shows which recommendations the user actually watched afterwards, and what they rated them.
+
+Example for user 1 (GA weights, triangular membership functions; 161 train ratings excluded):
+
+```
+primaryTitle                                    startYear  rating  score  test_rating
+Connections                                          1978   8.108  0.786            -
+My Flesh and Blood                                   2003   7.527  0.777            -
+...
+The Lord of the Rings: The Return of the King        2003   8.999  0.774            -
+Schindler's List                                     1993   8.998  0.774          5.0
+
+Watched later (test split): 1 of 10 | rated >= 4.0: 1
+```
+
 ---
 
 ## Results
@@ -87,6 +104,7 @@ Reference rankers on the same test split:
 
 ## Limitations and next steps
 - **No personalisation.** Adding a per-user feature (e.g. genre affinity from each user's training ratings) would give the GA a user-specific signal to optimise.
+- **Low-vote titles can outrank classics.** A well-rated documentary with ~1,500 votes fires the "hidden gem" rule and can score above *The Godfather*. The top scores are packed closely together (around 0.775), so small rule effects decide the order.
 - **Evaluation ranks only movies each user has rated**, not the full catalogue, so P@10 measures ordering quality within each user's history.
 - **Dataset:** MovieLens `ml-latest-small` (~100K ratings, 610 users). Results may differ on larger MovieLens releases.
 
@@ -103,6 +121,7 @@ membership_variants.py   compares triangular / Gaussian / trapezoidal families
 fuzzy_system.py          rule base, fuzzification, weighted Mamdani inference
 evaluation.py            train/test split, Precision@10 and Spearman, reference rankers
 ga.py                    DEAP genetic algorithm, results report, convergence plot
+recommend.py             top-N recommendations for one user, or overall
 data/processed/          saved GA results (JSON) and plots
 ```
 
@@ -111,7 +130,7 @@ data/processed/          saved GA results (JSON) and plots
 ## Running it (Windows PowerShell)
 
 ```powershell
-# 1. Create and activate a virtual environment
+# 1. Create and activate a virtual environment (use Activate.ps1 in PowerShell, not activate.bat)
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 
@@ -132,6 +151,11 @@ python ga.py
 python ga.py --family Gaussian      # one family only
 python ga.py --metric spearman      # use Spearman as the GA fitness
 python ga.py --report               # re-print results and redraw the plot from saved runs
+
+# 6. Top-N recommendations
+python recommend.py                 # overall top 10
+python recommend.py --user 1        # top 10 for MovieLens user 1
+python recommend.py --user 1 --n 20 --source baseline --family Gaussian
 ```
 
 Raw data is not committed to the repository; `download_data.py` and `build_features.py` recreate it.
